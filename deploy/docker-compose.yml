@@ -155,7 +155,8 @@ services:
     environment:
       <<: *db-env
       DATABASE_NAME_DEFAULT: guide
-      REDIS_HOST: redis
+      # Own Redis: guide hard-codes DB 0, and sharing it with sinergia mixes their Celery queues
+      REDIS_HOST: guide-redis
       REDIS_PORT: "6379"
       DEBUG: "False"
       FURY_INTERNAL_API_KEY: ${GUIDE_INTERNAL_API_KEY}
@@ -165,8 +166,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      guide-redis:
         condition: service_started
+
+  guide-redis:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - guideredisdata:/data
 
   frontend:
     build:
@@ -185,6 +193,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  guideredisdata:
   mongodata:
   n8ndata:
   strapiuploads:
