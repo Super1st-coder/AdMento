@@ -1,0 +1,188 @@
+# AdMento — full stack for the VPS (raw IP + ports, no domain).
+#
+# Public ports (http://<VPS_IP>:<port>):
+#   8080  frontend  (also proxies /api -> sinergia, so the browser uses one origin)
+#   8081  sinergia  main API (direct)
+#   8082  credits   billing API
+#   8083  guide     data backend API
+# Private ports (127.0.0.1 only — reach them with an SSH tunnel):
+#   8084  strapi admin
+#   8085  n8n
+#
+# Secrets/config live in /opt/admento/.env.deploy on the server (never committed).
+# Run via deploy/deploy.sh, which passes:  --env-file .env.deploy -p admento
+
+name: admento
+
+x-db-env: &db-env
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_USERNAME: ${DATABASE_USERNAME}
+  DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/10-admento.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USERNAME} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redisdata:/data
+
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongodata:/data/db
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    environment:
+      N8N_SECURE_COOKIE: "false"
+    volumes:
+      - n8ndata:/home/node/.n8n
+    ports:
+      - "127.0.0.1:8085:5678"
+
+  strapi:
+    build:
+      context: ../AdMento-backend/strapi-n8n
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      DATABASE_CLIENT: postgres
+      DATABASE_NAME: strapi
+      DATABASE_SSL: "false"
+      HOST: 0.0.0.0
+      PORT: "1337"
+      NODE_ENV: development
+      APP_KEYS: ${STRAPI_APP_KEYS}
+      API_TOKEN_SALT: ${STRAPI_API_TOKEN_SALT}
+      ADMIN_JWT_SECRET: ${STRAPI_ADMIN_JWT_SECRET}
+      TRANSFER_TOKEN_SALT: ${STRAPI_TRANSFER_TOKEN_SALT}
+      JWT_SECRET: ${STRAPI_JWT_SECRET}
+    volumes:
+      - strapiuploads:/opt/app/public/uploads
+    ports:
+      - "127.0.0.1:8084:1337"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sinergia:
+    build:
+      context: ../AdMento-backend/sinergia
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      CONFIG_TYPE: dev
+      DATABASE_NAME_SINERGIA: sinergia
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: "27017"
+      N8N_HOST: n8n
+      N8N_PORT: "5678"
+      STRAPI_HOST: strapi
+      STRAPI_PORT: "1337"
+      FRONT_HOST: ${PUBLIC_BASE_URL}
+      FRONT_PORT: "8080"
+      FACEBOOK_CLIENT_ID: ${FACEBOOK_CLIENT_ID:-}
+      FACEBOOK_CLIENT_SECRET: ${FACEBOOK_CLIENT_SECRET:-}
+      FACEBOOK_REDIRECT_URI: ${FACEBOOK_REDIRECT_URI:-}
+      FACEBOOK_GRAPH_API_BASE: ${FACEBOOK_GRAPH_API_BASE:-https://graph.facebook.com/v19.0}
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME:-}
+      GCS_SA_KEY_JSON: ${GCS_SA_KEY_JSON:-}
+      SENDGRID_SECRET_KEY: ${SENDGRID_SECRET_KEY:-}
+      SENDGRID_ACCOUNT_CONFIRMATION_TEMPLATE: ${SENDGRID_ACCOUNT_CONFIRMATION_TEMPLATE:-}
+      SENDGRID_RESET_PASSWORD_TEMPLATE: ${SENDGRID_RESET_PASSWORD_TEMPLATE:-}
+      SENDGRID_EMAIL_FROM: ${SENDGRID_EMAIL_FROM:-}
+      IMAGE_LIBRARY_URL: ${IMAGE_LIBRARY_URL:-}
+      IMAGE_LIBRARY_TOKEN: ${IMAGE_LIBRARY_TOKEN:-}
+      ABYSSALE_URL: ${ABYSSALE_URL:-}
+      ABYSSALE_TOKEN: ${ABYSSALE_TOKEN:-}
+      FURY_URL: ${FURY_URL:-}
+      FURY_SERVICE_API_KEY: ${FURY_SERVICE_API_KEY:-}
+      FONT_BUCKET_NAME: ${FONT_BUCKET_NAME:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-2}
+    ports:
+      - "8081:60000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      mongodb:
+        condition: service_started
+
+  credits:
+    build:
+      context: ../AdMento-credits
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      DATABASE_NAME_DEFAULT: credits
+      LUCA_CREDITS_INTERNAL_KEY: ${LUCA_CREDITS_INTERNAL_KEY}
+      DEBUG: "False"
+    ports:
+      - "8082:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  guide:
+    build:
+      context: ../AdMento-guide-backend/data/app
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      DATABASE_NAME_DEFAULT: guide
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      DEBUG: "False"
+      FURY_INTERNAL_API_KEY: ${GUIDE_INTERNAL_API_KEY}
+      CORS_ORIGINS: '["*"]'
+    ports:
+      - "8083:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ../AdMento-frontend
+      dockerfile: ../deploy/frontend.Dockerfile
+      additional_contexts:
+        deploy: .
+      args:
+        VITE_API_BASE_URL: ${PUBLIC_BASE_URL}:8080/api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - sinergia
+
+volumes:
+  pgdata:
+  redisdata:
+  mongodata:
+  n8ndata:
+  strapiuploads:
